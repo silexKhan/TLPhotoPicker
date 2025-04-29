@@ -1000,97 +1000,106 @@ extension TLPhotosPickerViewController: UICollectionViewDelegate,UICollectionVie
     
     //Datasource
     open func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        func makeCell(nibName: String) -> TLPhotoCollectionViewCell {
-            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: nibName, for: indexPath) as! TLPhotoCollectionViewCell
-            cell.configure = self.configure
+        guard let collection = self.focusedCollection else {
+            return UICollectionViewCell()
+        }
+
+        let isCameraCell = collection.useCameraButton && indexPath.section == 0 && indexPath.row == 0
+        let nibName = isCameraCell
+            ? (self.configure.cameraCellNibSet?.nibName ?? "TLPhotoCollectionViewCell")
+            : (self.configure.nibSet?.nibName ?? "TLPhotoCollectionViewCell")
+
+        let dequeuedCell = collectionView.dequeueReusableCell(withReuseIdentifier: nibName, for: indexPath)
+        
+        guard let cell = dequeuedCell as? TLPhotoCollectionViewCell else {
+            return dequeuedCell
+        }
+
+        // 공통 초기화
+        cell.configure = self.configure
+        cell.isCameraCell = isCameraCell
+        cell.liveBadgeImageView?.image = nil
+        cell.asset = nil
+        cell.orderLabel?.text = nil
+        cell.durationView?.isHidden = true
+        cell.livePhotoView?.livePhoto = nil
+
+        if isCameraCell {
+            cell.imageView?.image = self.cameraImage
+            return cell
+        }
+
+        guard let asset = collection.getTLAsset(at: indexPath) else {
             cell.imageView?.image = self.placeholderThumbnail
-            cell.liveBadgeImageView?.image = nil
             return cell
         }
-        let nibName = self.configure.nibSet?.nibName ?? "TLPhotoCollectionViewCell"
-        var cell = makeCell(nibName: nibName)
-        guard let collection = self.focusedCollection else { return cell }
-        cell.isCameraCell = collection.useCameraButton && indexPath.section == 0 && indexPath.row == 0
-        if cell.isCameraCell {
-            if let nibName = self.configure.cameraCellNibSet?.nibName {
-                cell = makeCell(nibName: nibName)
-            }else{
-                cell.imageView?.image = self.cameraImage
-            }
-            return cell
-        }
-        guard let asset = collection.getTLAsset(at: indexPath) else { return cell }
-        
+
+        // 일반 사진/비디오 셀 설정
+        cell.imageView?.image = self.placeholderThumbnail
         cell.asset = asset.phAsset
-        
+
         if let selectedAsset = getSelectedAssets(asset) {
             cell.selectedAsset = true
             cell.orderLabel?.text = "\(selectedAsset.selectedOrder)"
-        }else{
+        } else {
             cell.selectedAsset = false
         }
+
         if asset.state == .progress {
             cell.indicator?.startAnimating()
-        }else {
+        } else {
             cell.indicator?.stopAnimating()
         }
+
         if let phAsset = asset.phAsset {
+            let updateCell: (UIImage?) -> Void = { [weak self, weak cell] image in
+                guard let self = self, let cell = cell else { return }
+                cell.imageView?.image = image
+                cell.update(with: phAsset)
+                if self.allowedVideo {
+                    cell.durationView?.isHidden = asset.type != .video
+                    cell.duration = asset.type == .video ? phAsset.duration : nil
+                }
+            }
+
             if self.usedPrefetch {
                 let options = PHImageRequestOptions()
                 options.deliveryMode = .opportunistic
                 options.resizeMode = .exact
                 options.isNetworkAccessAllowed = true
-                let requestID = self.photoLibrary.imageAsset(asset: phAsset, size: self.thumbnailSize, options: options) { [weak self, weak cell] (image,complete) in
-                    guard let `self` = self else { return }
-                    DispatchQueue.main.async {
-                        if self.requestIDs[indexPath] != nil {
-                            cell?.imageView?.image = image
-                            cell?.update(with: phAsset)
-                            if self.allowedVideo {
-                                cell?.durationView?.isHidden = asset.type != .video
-                                cell?.duration = asset.type == .video ? phAsset.duration : nil
-                            }
-                            if complete {
-                                self.requestIDs.removeValue(forKey: indexPath)
-                            }
-                        }
-                    }
+                let requestID = self.photoLibrary.imageAsset(asset: phAsset, size: self.thumbnailSize, options: options) { image, complete in
+                    DispatchQueue.main.async { updateCell(image) }
                 }
                 if requestID > 0 {
                     self.requestIDs[indexPath] = requestID
                 }
-            }else {
-                queue.async { [weak self, weak cell] in
-                    guard let `self` = self else { return }
-                    let requestID = self.photoLibrary.imageAsset(asset: phAsset, size: self.thumbnailSize, completionBlock: { (image,complete) in
-                        DispatchQueue.main.async {
-                            if self.requestIDs[indexPath] != nil {
-                                cell?.imageView?.image = image
-                                cell?.update(with: phAsset)
-                                if self.allowedVideo {
-                                    cell?.durationView?.isHidden = asset.type != .video
-                                    cell?.duration = asset.type == .video ? phAsset.duration : nil
-                                }
-                                if complete {
-                                    self.requestIDs.removeValue(forKey: indexPath)
-                                }
-                            }
-                        }
-                    })
+            } else {
+                queue.async { [weak self] in
+                    guard let self = self else { return }
+                    let requestID = self.photoLibrary.imageAsset(asset: phAsset, size: self.thumbnailSize) { image, complete in
+                        DispatchQueue.main.async { updateCell(image) }
+                    }
                     if requestID > 0 {
-                        self.requestIDs[indexPath] = requestID
+                        DispatchQueue.main.async {
+                            self.requestIDs[indexPath] = requestID
+                        }
                     }
                 }
             }
+
             if self.allowedLivePhotos {
-                cell.liveBadgeImageView?.image = asset.type == .livePhoto ? PHLivePhotoView.livePhotoBadgeImage(options: .overContent) : nil
+                cell.liveBadgeImageView?.image = asset.type == .livePhoto
+                    ? PHLivePhotoView.livePhotoBadgeImage(options: .overContent)
+                    : nil
                 cell.livePhotoView?.delegate = asset.type == .livePhoto ? self : nil
             }
         }
+
         cell.alpha = 0
         UIView.transition(with: cell, duration: 0.1, options: .curveEaseIn, animations: {
             cell.alpha = 1
         }, completion: nil)
+
         return cell
     }
     
